@@ -43,6 +43,8 @@ export class ScheduleGenerationService {
       allLocks,
       allLeaves,
       rules,
+      workingHoursPeriods,
+      doctors,
     ] = await Promise.all([
       repo.list('assignments'),
       repo.list('nurses'),
@@ -54,9 +56,20 @@ export class ScheduleGenerationService {
       repo.list('locks'),
       repo.list('leaveEntries'),
       repo.list('rules'),
+      repo.list('workingHoursPeriods'),
+      repo.list('doctors'),
     ]);
 
     const scheduleAssignments = allAssignments.filter((a) => a.scheduleId === scheduleId);
+
+    // F-14: trailing window of assignments from BEFORE this schedule starts (any
+    // schedule), so consecutive-day/late-duty streaks and day-1 rest checks can see
+    // across the period boundary.
+    const [hy, hm, hd] = schedule.startDate.split('-').map(Number);
+    const historyWindowStart = new Date(Date.UTC(hy, hm - 1, hd - 30)).toISOString().split('T')[0];
+    const priorPeriodAssignments = allAssignments.filter(
+      (a) => a.date < schedule.startDate && a.date >= historyWindowStart
+    );
     const scheduleSessions = allSessions.filter(
       (s) => !s.cancelled && s.date >= schedule.startDate && s.date <= schedule.endDate
     );
@@ -64,10 +77,12 @@ export class ScheduleGenerationService {
     // Filter locks: if preserveManualLocks is false, exclude them
     let scheduleLocks: LockEntry[] = [];
     if (preserveManualLocks) {
+      // F-18: LockEntry has no scheduleId field — locks are date-scoped by design, so
+      // overlapping schedules share the locks in their window. The old
+      // `(l as any).scheduleId === scheduleId` clause was always false and only hid
+      // that fact from the compiler.
       scheduleLocks = allLocks.filter(
-        (l) =>
-          (l as any).scheduleId === scheduleId ||
-          (l.date >= schedule.startDate && l.date <= schedule.endDate)
+        (l) => l.date >= schedule.startDate && l.date <= schedule.endDate
       );
     }
 
@@ -87,7 +102,25 @@ export class ScheduleGenerationService {
       engineMode = 'REBALANCE';
     } else if (mode === 'CLEAR_GENERATED') {
       engineMode = 'CLEAR_GENERATED';
-    } else if (mode === 'REGENERATE_BLOCK' && options.blockIndex !== undefined) {
+    } else if (mode === 'REGENERATE_BLOCK') {
+      // F-21: validate the block bounds explicitly. The old guard silently degraded a
+      // missing blockIndex into a FULL-ROSTER pass, and a missing/zero blockWeeks
+      // produced a NaN epoch that threw an opaque RangeError from toISOString().
+      if (
+        options.blockIndex === undefined ||
+        options.blockIndex === null ||
+        !Number.isInteger(options.blockIndex) ||
+        options.blockIndex < 0
+      ) {
+        throw new Error(
+          `REGENERATE_BLOCK requires a non-negative integer blockIndex option (got ${options.blockIndex}).`
+        );
+      }
+      if (!Number.isFinite(schedule.blockWeeks) || schedule.blockWeeks < 1) {
+        throw new Error(
+          `REGENERATE_BLOCK requires schedule.blockWeeks >= 1 (schedule ${schedule.id} has ${schedule.blockWeeks}).`
+        );
+      }
       // Calculate block start and end dates
       const blockDays = schedule.blockWeeks * 7;
       const blockStartMs =
@@ -114,7 +147,10 @@ export class ScheduleGenerationService {
       engineMode = 'EMPTY_ONLY';
     }
 
-    // Run solver engine
+    // Run solver engine.
+    // workingHoursPeriods and doctors MUST be forwarded (F-3): omitting them made the
+    // server path ignore dedicated-period hour targets and weakened H8 doctor-specialty
+    // allocation, producing different rosters than the client path for identical data.
     const engineResult = await SchedulingEngine.generate(
       schedule,
       engineMode,
@@ -127,16 +163,25 @@ export class ScheduleGenerationService {
       scheduleSessions,
       scheduleLocks,
       scheduleLeaves,
-      rules
+      rules,
+      undefined, // onProgress not needed server-side
+      workingHoursPeriods,
+      doctors,
+      priorPeriodAssignments // F-14: cross-boundary streak & rest context
     );
 
-    // Atomically persist results
-    const oldIds = scheduleAssignments.map((a) => a.id);
-    if (oldIds.length > 0) {
-      await repo.bulkRemove('assignments', oldIds);
-    }
+    // Persist results (F-15): upsert the new roster FIRST, then remove only the
+    // stale ids no longer present. The legacy delete-ALL-then-insert sequence left a
+    // window where a crash (or a concurrent reader) saw an EMPTY schedule; with this
+    // ordering a crash between the two writes leaves at worst a few stale extras,
+    // which the next generation pass cleans up — never data loss.
     if (engineResult.assignments.length > 0) {
       await repo.bulkUpsert('assignments', engineResult.assignments);
+    }
+    const resultIds = new Set(engineResult.assignments.map((a) => a.id));
+    const staleIds = scheduleAssignments.filter((a) => !resultIds.has(a.id)).map((a) => a.id);
+    if (staleIds.length > 0) {
+      await repo.bulkRemove('assignments', staleIds);
     }
 
     // Update schedule timestamp

@@ -39,6 +39,7 @@ const ALLOWED_COLLECTIONS: Set<string> = new Set<CollectionName>([
   'swaps',
   'userAccess',
   'availabilityRequests',
+  'workingHoursPeriods',
 ]);
 
 function validateCollection(req: Request, res: Response): CollectionName | null {

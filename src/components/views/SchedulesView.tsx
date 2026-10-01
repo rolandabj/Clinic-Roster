@@ -789,6 +789,24 @@ export const SchedulesView: React.FC<SchedulesViewProps> = ({
         }
       }
 
+      // F-14: fetch the trailing 30 days of assignments from BEFORE this schedule
+      // starts (any schedule) so streak/rest checks see across the period boundary.
+      let priorPeriodAssignments: Assignment[] = [];
+      if (activeSchedule.startDate) {
+        try {
+          const [hy, hm, hd] = activeSchedule.startDate.split('-').map(Number);
+          const historyWindowStart = new Date(Date.UTC(hy, hm - 1, hd - 30))
+            .toISOString()
+            .split('T')[0];
+          const allStoredAssignments = await repo.list('assignments');
+          priorPeriodAssignments = allStoredAssignments.filter(
+            (a) => a.date < activeSchedule.startDate && a.date >= historyWindowStart
+          );
+        } catch (histErr) {
+          console.error('Failed to load prior-period assignment history:', histErr);
+        }
+      }
+
       const result = await SchedulingEngine.generate(
         activeSchedule,
         activeGenerationMode,
@@ -806,7 +824,8 @@ export const SchedulesView: React.FC<SchedulesViewProps> = ({
           setGenerationProgress(progress);
         },
         workingHoursPeriods,
-        doctors
+        doctors,
+        priorPeriodAssignments
       );
 
       // If engine resolved an authoritative period target, synchronize the schedule record

@@ -7,7 +7,6 @@
  * and progressive chunked generation to never freeze the UI.
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import {
   Schedule,
   Assignment,
@@ -33,7 +32,7 @@ import {
   GenerationPreflightSummary,
 } from './types';
 import { isExclusiveNurseClinic } from './nurseClinicUtils';
-import { calculateWorkingHoursForDateRange } from '../periods/workingHoursPeriodService';
+import { calculateWorkingHoursForDateRange, getInclusiveDays } from '../periods/workingHoursPeriodService';
 import { generateDoctorSessionsForDateRange } from '../schedule/doctorScheduleService';
 import { calculateDutyDurationHours } from '../reports/hoursAccounting';
 
@@ -88,9 +87,11 @@ interface NurseDayState {
   assignmentKind?: 'DOCTOR' | 'SPECIALTY' | 'CLINICAL_ROLE';
   targetId?: string;
   source?: AssignmentSource;
-  consecutiveWorkingDays: number;
-  consecutiveLateEnds: number; // shifts ending at or after 21:00
-  totalDutyHoursEarned: number;
+  // F-23: the old consecutiveWorkingDays / consecutiveLateEnds shadow counters were
+  // removed — all H2/S1 decisions use the deterministic calendar lookback helpers
+  // (getConsecutiveDaysWorkedEndingYesterday / getConsecutiveLateDutiesEndingYesterday),
+  // so maintaining a second, write-only source of truth was pure drift hazard.
+  totalDutyHoursEarned: number; // DUTY hours only — excludes leave credit (see leaveHoursCredited)
   leaveHoursCredited?: number;
   initialLockedHours?: number;
   weekendsWorked: number;
@@ -325,12 +326,21 @@ export class SchedulingEngine {
     rules: Rule[],
     onProgress?: GenerationProgressCallback,
     workingHoursPeriods?: WorkingHoursPeriod[],
-    doctors: Doctor[] = []
+    doctors: Doctor[] = [],
+    // F-14: assignments from BEFORE schedule.startDate (any schedule) so that
+    // consecutive-day / late-duty streaks and first-day rest checks can see
+    // across the schedule boundary. Callers should pass the trailing ~30 days.
+    priorPeriodAssignments: Assignment[] = []
   ): Promise<GenerationResult> {
     const startTimeMs = performance.now();
 
     // 1. Sort inputs deterministically
-    const sortedNurses = [...nurses].sort((a, b) => a.fullName.localeCompare(b.fullName));
+    // Only active nurses are schedulable (F-4). Treat a missing `active` flag as active
+    // for resilience with legacy records. Preserved/locked assignments belonging to
+    // inactive nurses are still retained, but no NEW duties are generated for them.
+    const sortedNurses = [...nurses]
+      .filter((n) => n.active !== false)
+      .sort((a, b) => a.fullName.localeCompare(b.fullName));
     const fullDayDuty = dutyWindows.find((d) => d.acronym === 'D') || dutyWindows[0];
     const lateDuty = dutyWindows.find((d) => d.acronym === 'L') || dutyWindows[0];
     const earlyDuty = dutyWindows.find((d) => d.acronym === 'E') || dutyWindows[0];
@@ -459,6 +469,15 @@ export class SchedulingEngine {
     let preservedLocksCount = 0;
     let preservedManualCount = 0;
 
+    // F-14: Prior-period history map (strictly BEFORE schedule.startDate), so
+    // H2/S1 streak lookbacks and day-1 rest checks see across the boundary.
+    const historyAssignmentsMap = new Map<string, Assignment>();
+    priorPeriodAssignments.forEach((a) => {
+      if (a.date < schedule.startDate) {
+        historyAssignmentsMap.set(`${a.nurseId}_${a.date}`, a);
+      }
+    });
+
     // Filter existing assignments based on mode
     if (mode === 'CLEAR_GENERATED') {
       existingAssignments.forEach((a) => {
@@ -500,6 +519,9 @@ export class SchedulingEngine {
     activeLocks.forEach((lock) => {
       const key = `${lock.nurseId}_${lock.date}`;
       if (lock.mode === 'ASSIGNMENT' && lock.dutyWindowId) {
+        // F-17: if this nurse/date was already retained above as a LOCK-source
+        // assignment, re-materializing it here must not count it a second time.
+        const alreadyCountedAsLock = resultAssignmentsMap.get(key)?.source === 'LOCK';
         const lockAssignment: Assignment = {
           id: `asgn-lock-${lock.nurseId}-${lock.date}`,
           scheduleId: schedule.id,
@@ -515,14 +537,22 @@ export class SchedulingEngine {
           note: lock.note || 'Pinned by schedule lock',
         };
         resultAssignmentsMap.set(key, lockAssignment);
-        preservedLocksCount++;
+        if (!alreadyCountedAsLock) preservedLocksCount++;
       }
     });
 
     // 3. Nurse State Tracking
     const nurseStates = new Map<string, NurseDayState>();
+    // F-14: the calendar day immediately before the schedule starts — used to seed
+    // lastDutyEndTime so the day-1 backward rest check (H3) sees the previous period.
+    const [sy, sm, sd] = schedule.startDate.split('-').map(Number);
+    const dayBeforeStart = new Date(Date.UTC(sy, sm - 1, sd - 1)).toISOString().split('T')[0];
     sortedNurses.forEach((nurse) => {
-      // Calculate credited leave hours for this nurse during the schedule period
+      // Calculate credited leave hours for this nurse during the schedule period.
+      // F-8: `hoursCredited` is a TOTAL for the whole leave entry — credit only the
+      // prorated share of the days that actually fall inside this schedule window.
+      // Previously a long leave merely touching the window credited its full hours,
+      // wiping out the nurse's schedulable capacity for the period.
       const nurseLeaveHours = leaveEntries
         .filter(
           (le) =>
@@ -531,7 +561,14 @@ export class SchedulingEngine {
             le.startDate <= schedule.endDate &&
             le.endDate >= schedule.startDate
         )
-        .reduce((acc, le) => acc + (le.hoursCredited || 8), 0);
+        .reduce((acc, le) => {
+          const leaveDays = Math.max(1, getInclusiveDays(le.startDate, le.endDate));
+          const overlapStart = le.startDate > schedule.startDate ? le.startDate : schedule.startDate;
+          const overlapEnd = le.endDate < schedule.endDate ? le.endDate : schedule.endDate;
+          const overlapDays = Math.max(0, getInclusiveDays(overlapStart, overlapEnd));
+          const totalEntryHours = le.hoursCredited || leaveDays * 8;
+          return acc + Math.round((totalEntryHours * overlapDays) / leaveDays);
+        }, 0);
 
       // Calculate initial committed duty hours from retained locks and manual assignments
       let initialPreservedDutyHours = 0;
@@ -546,11 +583,23 @@ export class SchedulingEngine {
         }
       });
 
+      // F-14: seed the last duty end from the prior period's final day (if any)
+      let initialLastDutyEndTime: string | undefined;
+      const histPrev = historyAssignmentsMap.get(`${nurse.id}_${dayBeforeStart}`);
+      if (histPrev) {
+        const histDuty = dutyWindows.find((d) => d.id === histPrev.dutyWindowId);
+        if (histDuty) initialLastDutyEndTime = `${dayBeforeStart} ${histDuty.endTime}`;
+      }
+
       nurseStates.set(nurse.id, {
         hasDuty: false,
-        consecutiveWorkingDays: 0,
-        consecutiveLateEnds: 0,
-        totalDutyHoursEarned: initialPreservedDutyHours + nurseLeaveHours,
+        lastDutyEndTime: initialLastDutyEndTime,
+        // DUTY hours only (leave credit tracked separately in leaveHoursCredited).
+        // Keeping leave out of this accumulator prevents double-counting leave against
+        // the H7 cap, whose maxAllowedHours is already derived from the leave-reduced
+        // dutyTarget. Preserved (lock/manual/retained) shift hours are reserved upfront
+        // here; the day loop must NOT re-add them when it reaches their dates.
+        totalDutyHoursEarned: initialPreservedDutyHours,
         leaveHoursCredited: nurseLeaveHours,
         initialLockedHours: initialPreservedDutyHours,
         weekendsWorked: initialWeekendsWorked,
@@ -592,13 +641,20 @@ export class SchedulingEngine {
     // Global duty window lookup
     const dutyMapGlobal = new Map(dutyWindows.map((d) => [d.id, d]));
 
-    // Deterministic calendar lookback helper for Hard Rule H2 (Max 6 consecutive working days)
+    // Unified lookup across this run's assignments AND prior-period history (F-14)
+    const getAssignmentOn = (nurseId: string, dateStr: string): Assignment | undefined =>
+      resultAssignmentsMap.get(`${nurseId}_${dateStr}`) || historyAssignmentsMap.get(`${nurseId}_${dateStr}`);
+
+    // Deterministic calendar lookback helper for Hard Rule H2 (Max consecutive working days).
+    // F-6: the lookback horizon must follow the configured rule value — a hardcoded 6
+    // silently disabled H2 for any configured value above 6 (bounded at 60 for safety).
+    const h2LookbackDays = Math.min(60, Math.max(1, maxConsecutiveDays) + 1);
     const getConsecutiveDaysWorkedEndingYesterday = (nurseId: string, currentDateStr: string): number => {
       let consecutive = 0;
       const [y, m, d] = currentDateStr.split('-').map(Number);
-      for (let i = 1; i <= 6; i++) {
+      for (let i = 1; i <= h2LookbackDays; i++) {
         const prevDate = new Date(Date.UTC(y, m - 1, d - i)).toISOString().split('T')[0];
-        if (resultAssignmentsMap.has(`${nurseId}_${prevDate}`)) {
+        if (getAssignmentOn(nurseId, prevDate)) {
           consecutive++;
         } else {
           break;
@@ -613,7 +669,7 @@ export class SchedulingEngine {
       const [y, m, d] = currentDateStr.split('-').map(Number);
       for (let i = 1; i <= maxConsecutiveLate + 2; i++) {
         const prevDate = new Date(Date.UTC(y, m - 1, d - i)).toISOString().split('T')[0];
-        const prevAsgn = resultAssignmentsMap.get(`${nurseId}_${prevDate}`);
+        const prevAsgn = getAssignmentOn(nurseId, prevDate);
         if (!prevAsgn) break;
         const prevDuty = dutyMapGlobal.get(prevAsgn.dutyWindowId);
         if (prevDuty && prevDuty.endTime >= '21:00') {
@@ -623,6 +679,23 @@ export class SchedulingEngine {
         }
       }
       return consecutive;
+    };
+
+    // F-13: Forward rest check — placing `duty` on `date` must leave at least the
+    // minimum rest before any ALREADY-MATERIALIZED assignment on the next day
+    // (e.g. a locked/manual early duty tomorrow). The backward check alone lets the
+    // generator create violations it can already see coming.
+    const violatesRestBeforeNextDay = (nurseId: string, dateStr: string, duty: DutyWindow): boolean => {
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const nextDate = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().split('T')[0];
+      const nextAsgn = resultAssignmentsMap.get(`${nurseId}_${nextDate}`);
+      if (!nextAsgn) return false;
+      const nextDuty = dutyMapGlobal.get(nextAsgn.dutyWindowId);
+      if (!nextDuty) return false;
+      const [endH, endM] = duty.endTime.split(':').map(Number);
+      const [startH, startM] = nextDuty.startTime.split(':').map(Number);
+      const restHours = (24 - endH - endM / 60) + (startH + startM / 60);
+      return restHours < minRestHoursRequired;
     };
 
     // Build quick lookup for doctor -> set of specialtyIds
@@ -850,22 +923,16 @@ export class SchedulingEngine {
           const duty = dutyWindows.find((d) => d.id === asgn.dutyWindowId) || fullDayDuty;
           const state = nurseStates.get(nurse.id);
           if (state) {
-            state.consecutiveWorkingDays = getConsecutiveDaysWorkedEndingYesterday(nurse.id, date) + 1;
-            state.totalDutyHoursEarned += calculateDutyDurationHours(duty);
+            // NOTE: duty hours and weekend counts for preserved assignments were already
+            // credited upfront at nurse-state initialization (initialPreservedDutyHours /
+            // initialWeekendsWorked) — do NOT add them again here, or every preserved
+            // shift is double-counted against H7 and the S3/S4 fairness scores.
             state.lastDutyEndTime = `${date} ${duty.endTime}`;
             if (
               asgn.kind === 'CLINICAL_ROLE' &&
               (asgn.clinicalRoleId === nurseClinicRole.id || asgn.clinicalRoleId === 'role-nurse-clinic')
             ) {
               state.nurseClinicCount += 1;
-            }
-            if (duty.endTime >= '21:00') {
-              state.consecutiveLateEnds += 1;
-            } else {
-              state.consecutiveLateEnds = 0;
-            }
-            if (isWeekend) {
-              state.weekendsWorked += 1;
             }
           }
         }
@@ -885,20 +952,39 @@ export class SchedulingEngine {
           dutyWindows
         );
 
-        // Build tiers sequence: Priority duties first; fallback duties second
+        // Build tiers sequence — COVERAGE CLASS DOMINATES (F-11):
+        //   Tier A: duties that fully cover the slot's time window
+        //   Tier B: duties that at least overlap it
+        //   Tier C: non-overlapping duties (last resort only, so a slot is still
+        //           staffed in degenerate duty configurations rather than unmet)
+        // Within each class, priority duties keep precedence over standard ones.
+        // Previously the priority flag dominated: a "priority" duty with ZERO overlap
+        // (e.g. a morning window for an evening session) short-circuited evaluation
+        // and beat a fully-covering standard duty, leaving the session hours
+        // effectively unstaffed while the roster looked filled.
+        const orderedCandidateDuties = [...priorityTier, ...fallbackTier];
+        const fullCoverDuties = orderedCandidateDuties.filter(
+          (d) => d.startTime <= slot.startTime && d.endTime >= slot.endTime
+        );
+        const overlapDuties = orderedCandidateDuties.filter(
+          (d) =>
+            !(d.startTime <= slot.startTime && d.endTime >= slot.endTime) &&
+            d.startTime < slot.endTime &&
+            d.endTime > slot.startTime
+        );
+        const nonOverlapDuties = orderedCandidateDuties.filter(
+          (d) => !(d.startTime < slot.endTime && d.endTime > slot.startTime)
+        );
+
         const tiersToEvaluate: DutyWindow[][] = [];
-        if (priorityTier.length > 0) {
-          tiersToEvaluate.push(priorityTier);
-        }
-        if (fallbackTier.length > 0) {
-          tiersToEvaluate.push(fallbackTier);
-        }
+        if (fullCoverDuties.length > 0) tiersToEvaluate.push(fullCoverDuties);
+        if (overlapDuties.length > 0) tiersToEvaluate.push(overlapDuties);
+        if (nonOverlapDuties.length > 0) tiersToEvaluate.push(nonOverlapDuties);
         if (tiersToEvaluate.length === 0) {
           tiersToEvaluate.push([fullDayDuty]);
         }
 
         let bestNurse: Nurse | null = null;
-        let bestScore = -999999;
         let chosenDuty: DutyWindow = fullDayDuty;
         let matchedPairingTier = 0; // 1 = Priority #1, 2 = Priority #2, 3 = Priority #3+, 4 = Specialty, 5 = General Pool
 
@@ -1080,7 +1166,6 @@ export class SchedulingEngine {
           if (cohort.nurses.length === 0) continue;
 
           let cohortBestNurse: Nurse | null = null;
-          let cohortBestScore = -999999;
           let cohortChosenDuty: DutyWindow | null = null;
 
           for (const tier of tiersToEvaluate) {
@@ -1124,6 +1209,10 @@ export class SchedulingEngine {
                 }
 
                 // HARD CONSTRAINT H6: Capability check
+                // F-22 (design limitation, intentional): the hard credential gate covers
+                // ONLY PHL — other clinical roles admit non-credentialed nurses via the
+                // ROLE_FALLBACK cohort by design, and the validator enforces the same
+                // PHL-only rule. Extending H6 to more roles must change BOTH sites.
                 if (slot.kind === 'CLINICAL_ROLE') {
                   const role = roles.find((r) => r.id === slot.targetId);
                   if (role?.acronym === 'PHL' && !nurse.capabilityIds.includes(role.id)) {
@@ -1165,6 +1254,12 @@ export class SchedulingEngine {
                       continue; // Violates mandatory rest period
                     }
                   }
+                }
+
+                // HARD CONSTRAINT H3 (forward, F-13): respect rest before a locked/manual
+                // duty already materialized on the NEXT day.
+                if (violatesRestBeforeNextDay(nurse.id, date, candidateDuty)) {
+                  continue;
                 }
 
                 // HARD CONSTRAINT H7: Maximum working hours limit (prevent nurse overwork)
@@ -1283,8 +1378,10 @@ export class SchedulingEngine {
                 }
 
                 // S3: Hours fairness — score bonus for nurses furthest below target
+                // (totalDutyHoursEarned now holds duty hours only — leave credit is no
+                // longer baked in, so no subtraction is needed here.)
                 const dutyTarget = nurseLimits?.dutyTarget ?? Math.round(effectiveFullTimeTarget * (nurse.contractPercent / 100));
-                const hoursDeficit = dutyTarget - (state.totalDutyHoursEarned - (state.leaveHoursCredited || 0));
+                const hoursDeficit = dutyTarget - state.totalDutyHoursEarned;
                 if (hoursDeficit <= 0) {
                   score -= 150; // Nurse has already met duty hours target; strongly prioritize nurses with remaining hours
                 } else {
@@ -1346,7 +1443,6 @@ export class SchedulingEngine {
             // If this duty tier found an eligible nurse and duty, adopt it and do not drop to fallback
             if (tierBestNurse && tierChosenDuty) {
               cohortBestNurse = tierBestNurse;
-              cohortBestScore = tierBestScore;
               cohortChosenDuty = tierChosenDuty;
               break;
             }
@@ -1355,7 +1451,6 @@ export class SchedulingEngine {
           // If this priority cohort found a valid candidate who satisfies hard rules:
           if (cohortBestNurse && cohortChosenDuty) {
             bestNurse = cohortBestNurse;
-            bestScore = cohortBestScore;
             chosenDuty = cohortChosenDuty;
             matchedPairingTier = cohort.tierRank;
             break; // Stop evaluating lower-priority cohorts!
@@ -1396,7 +1491,6 @@ export class SchedulingEngine {
 
           // Update nurse counters
           const state = nurseStates.get(bestNurse.id)!;
-          state.consecutiveWorkingDays = getConsecutiveDaysWorkedEndingYesterday(bestNurse.id, date) + 1;
           state.totalDutyHoursEarned += calculateDutyDurationHours(chosenDuty);
           state.lastDutyEndTime = `${date} ${chosenDuty.endTime}`;
           if (isNurseClinicSlot) {
@@ -1404,11 +1498,6 @@ export class SchedulingEngine {
           }
           if (isWeekend) {
             state.weekendsWorked += 1;
-          }
-          if (chosenDuty.endTime >= '21:00') {
-            state.consecutiveLateEnds += 1;
-          } else {
-            state.consecutiveLateEnds = 0;
           }
         } else {
           unmetSlotsCount++;
@@ -1470,6 +1559,13 @@ export class SchedulingEngine {
             const key = `${n.id}_${date}`;
             if (resultAssignmentsMap.has(key)) return false;
 
+            // Respect LockEntry(OFF): a senior explicitly pinned OFF today must not be
+            // swapped onto a duty by the H1 fixer (F-5).
+            const seniorHasLockOff = activeLocks.some(
+              (l) => l.nurseId === n.id && l.date === date && l.mode === 'OFF'
+            );
+            if (seniorHasLockOff) return false;
+
             const onLeave = leaveEntries.some(
               (le) =>
                 le.nurseId === n.id &&
@@ -1512,6 +1608,8 @@ export class SchedulingEngine {
                   if (restHours < minRestHoursRequired) return false;
                 }
               }
+              // F-13: forward rest check against tomorrow's materialized duty
+              if (violatesRestBeforeNextDay(n.id, date, targetDuty)) return false;
             }
 
             return true;
@@ -1523,13 +1621,27 @@ export class SchedulingEngine {
             nursesAssignedToday.delete(targetAssignment.nurseId);
             const juniorState = nurseStates.get(targetAssignment.nurseId);
             if (juniorState) {
-              juniorState.consecutiveWorkingDays = getConsecutiveDaysWorkedEndingYesterday(targetAssignment.nurseId, date);
               juniorState.totalDutyHoursEarned = Math.max(
                 0,
                 juniorState.totalDutyHoursEarned - calculateDutyDurationHours(targetDuty)
               );
-              if (targetDuty.endTime >= '21:00') {
-                juniorState.consecutiveLateEnds = Math.max(0, juniorState.consecutiveLateEnds - 1);
+              // F-12: symmetric rollback. The old code rolled back hours/streaks but
+              // left lastDutyEndTime pointing at the removed duty's end (false H3 rest
+              // blocks for the junior the next day) and never decremented
+              // weekendsWorked (inflated S4 weekend-equity penalty).
+              if (isWeekend) {
+                juniorState.weekendsWorked = Math.max(0, juniorState.weekendsWorked - 1);
+              }
+              juniorState.lastDutyEndTime = undefined;
+              const [jy, jm, jd] = date.split('-').map(Number);
+              for (let back = 1; back <= h2LookbackDays; back++) {
+                const prevDateStr = new Date(Date.UTC(jy, jm - 1, jd - back)).toISOString().split('T')[0];
+                const prevAsgn = getAssignmentOn(targetAssignment.nurseId, prevDateStr);
+                if (prevAsgn) {
+                  const prevDuty = dutyMapGlobal.get(prevAsgn.dutyWindowId) || fullDayDuty;
+                  juniorState.lastDutyEndTime = `${prevDateStr} ${prevDuty.endTime}`;
+                  break;
+                }
               }
             }
 
@@ -1543,15 +1655,9 @@ export class SchedulingEngine {
             nursesAssignedToday.add(availableSenior.id);
             const seniorState = nurseStates.get(availableSenior.id);
             if (seniorState) {
-              seniorState.consecutiveWorkingDays = getConsecutiveDaysWorkedEndingYesterday(availableSenior.id, date) + 1;
               seniorState.totalDutyHoursEarned += calculateDutyDurationHours(targetDuty);
               seniorState.lastDutyEndTime = `${date} ${targetDuty.endTime}`;
               if (isWeekend) seniorState.weekendsWorked += 1;
-              if (targetDuty.endTime >= '21:00') {
-                seniorState.consecutiveLateEnds += 1;
-              } else {
-                seniorState.consecutiveLateEnds = 0;
-              }
             }
           }
         }
@@ -1561,6 +1667,13 @@ export class SchedulingEngine {
       // Ensure at least one additional nurse above active doctors during clinic operating hours.
       if (plusOneEnabled && daySessions.length > 0) {
         const dutyMapLocal = new Map(dutyWindows.map((d) => [d.id, d]));
+
+        // F-10: the clinic's operating window is the span of TODAY'S actual sessions
+        // (first start → last end), not a blanket 09:00–21:00. The old always-true
+        // condition demanded +1 coverage until 21:00 even when the clinic closed at
+        // noon, producing spurious deficits and phantom duty extensions/floats.
+        const dayOpStart = daySessions.reduce((min, s) => (s.startTime < min ? s.startTime : min), daySessions[0].startTime);
+        const dayOpEnd = daySessions.reduce((max, s) => (s.endTime > max ? s.endTime : max), daySessions[0].endTime);
 
         let hasDeficit = true;
         let attempts = 0;
@@ -1586,7 +1699,7 @@ export class SchedulingEngine {
               return duty.startTime < hourEnd && duty.endTime > hourStart;
             }).length;
 
-            const isOperating = docsActive > 0 || (hour >= 9 && hour <= 20 && daySessions.length > 0);
+            const isOperating = docsActive > 0 || (hourStart < dayOpEnd && hourEnd > dayOpStart);
             const required = docsActive + (isOperating ? minAdditionalNurses : 0);
             const deficit = Math.max(0, required - nursesActive);
 
@@ -1605,7 +1718,10 @@ export class SchedulingEngine {
             let promoted = false;
             if (worstHour >= 16) {
               const eligibleAssigned = Array.from(resultAssignmentsMap.values()).filter((a) => {
-                if (a.date !== date || a.locked) return false;
+                // F-16: never extend locked OR planner-authored assignments. MANUAL
+                // entries have locked=false, so the `a.locked` check alone silently
+                // rewrote a planner's explicit duty choice.
+                if (a.date !== date || a.locked || a.source === 'MANUAL' || a.source === 'LOCK') return false;
                 const duty = dutyMapLocal.get(a.dutyWindowId);
                 return duty && duty.endTime < '21:00';
               });
@@ -1643,6 +1759,11 @@ export class SchedulingEngine {
                 ) {
                   continue; // Duty extension would exceed maximum consecutive late duties ending at 21:00
                 }
+                // F-13: an extension that pushes today's end time later must still
+                // leave minimum rest before tomorrow's already-materialized duty.
+                if (violatesRestBeforeNextDay(nurse.id, date, newDuty)) {
+                  continue;
+                }
                 const oldDuty = dutyMapLocal.get(asgn.dutyWindowId) || fullDayDuty;
                 const addedHours =
                   calculateDutyDurationHours(newDuty) -
@@ -1659,17 +1780,21 @@ export class SchedulingEngine {
                   continue; // Duty extension would cause overwork
                 }
 
-                asgn.dutyWindowId = newDuty.id;
-                asgn.note = asgn.note
-                  ? `${asgn.note} (Extended for +1 clinic coverage)`
-                  : 'Extended for +1 clinic coverage (overhang)';
+                // F-16: clone instead of mutating in place — retained assignment
+                // objects can be the very same references the caller passed in
+                // `existingAssignments`; in-place edits leaked into caller state.
+                const extendedAsgn: Assignment = {
+                  ...asgn,
+                  dutyWindowId: newDuty.id,
+                  note: asgn.note
+                    ? `${asgn.note} (Extended for +1 clinic coverage)`
+                    : 'Extended for +1 clinic coverage (overhang)',
+                };
+                resultAssignmentsMap.set(`${asgn.nurseId}_${asgn.date}`, extendedAsgn);
 
                 if (state) {
                   state.totalDutyHoursEarned += Math.max(0, addedHours);
                   state.lastDutyEndTime = `${date} ${newDuty.endTime}`;
-                  if (newDuty.endTime >= '21:00') {
-                    state.consecutiveLateEnds += 1;
-                  }
                 }
                 promoted = true;
                 break;
@@ -1742,6 +1867,9 @@ export class SchedulingEngine {
                   }
                 }
 
+                // F-13: forward rest check against tomorrow's materialized duty
+                if (violatesRestBeforeNextDay(nurse.id, date, chosenDuty)) return false;
+
                 return true;
               });
 
@@ -1804,16 +1932,10 @@ export class SchedulingEngine {
 
                 const state = nurseStates.get(bestCandidate.id);
                 if (state) {
-                  state.consecutiveWorkingDays = getConsecutiveDaysWorkedEndingYesterday(bestCandidate.id, date) + 1;
                   state.totalDutyHoursEarned += calculateDutyDurationHours(chosenDuty);
                   state.lastDutyEndTime = `${date} ${chosenDuty.endTime}`;
                   if (isNcQualified) state.nurseClinicCount += 1;
                   if (isWeekend) state.weekendsWorked += 1;
-                  if (chosenDuty.endTime >= '21:00') {
-                    state.consecutiveLateEnds += 1;
-                  } else {
-                    state.consecutiveLateEnds = 0;
-                  }
                 }
               } else {
                 break;
@@ -1831,11 +1953,13 @@ export class SchedulingEngine {
           const nurseTarget = nurseLimits?.dutyTarget ?? Math.round(effectiveFullTimeTarget * (nurse.contractPercent / 100));
           const consecutiveDaysEndingYesterday = getConsecutiveDaysWorkedEndingYesterday(nurse.id, date);
 
-          // If significantly below target and under consecutive day limit, place in general pool
-          // Float pool must NEVER push a nurse over their duty target, and never push to 6 or 7 consecutive days
+          // If significantly below target and under consecutive day limit, place in general pool.
+          // F-7: the pool ceiling follows the configured H2 rule (with a one-day pacing
+          // margin, preserving the legacy "stop at 5 when the limit is 6" behavior)
+          // instead of a hardcoded 5, which ignored stricter configured limits.
           if (
             state.totalDutyHoursEarned < nurseTarget &&
-            consecutiveDaysEndingYesterday < 5
+            consecutiveDaysEndingYesterday < Math.max(1, maxConsecutiveDays - 1)
           ) {
             const onLeave = leaveEntries.some(
               (le) =>
@@ -1845,6 +1969,13 @@ export class SchedulingEngine {
                 date <= le.endDate
             );
             if (onLeave) return;
+
+            // Respect LockEntry(OFF): nurses pinned OFF today must never be floated
+            // into the pool (F-5).
+            const hasLockOffToday = activeLocks.some(
+              (l) => l.nurseId === nurse.id && l.date === date && l.mode === 'OFF'
+            );
+            if (hasLockOffToday) return;
 
             // Prioritize priority duty windows first; fallback to standard duties for pool
             const activePoolDuties = dutyWindows.filter((d) => d.active !== false);
@@ -1888,6 +2019,10 @@ export class SchedulingEngine {
                     }
                   }
                 }
+                // F-13: forward rest check against tomorrow's materialized duty
+                if (restCompliant && violatesRestBeforeNextDay(nurse.id, date, cand)) {
+                  restCompliant = false;
+                }
                 if (restCompliant) {
                   selectedPoolDuty = cand;
                   break;
@@ -1929,28 +2064,16 @@ export class SchedulingEngine {
             };
             resultAssignmentsMap.set(`${nurse.id}_${date}`, poolAssignment);
             nursesAssignedToday.add(nurse.id);
-            state.consecutiveWorkingDays = consecutiveDaysEndingYesterday + 1;
             state.totalDutyHoursEarned += calculateDutyDurationHours(selectedPoolDuty);
             state.lastDutyEndTime = `${date} ${selectedPoolDuty.endTime}`;
             if (isWeekend) state.weekendsWorked += 1;
-            if (selectedPoolDuty.endTime >= '21:00') {
-              state.consecutiveLateEnds += 1;
-            } else {
-              state.consecutiveLateEnds = 0;
-            }
             createdCount++;
           }
         }
       });
 
-      // End-of-Day Lifecycle: Reset consecutive working days for all nurses who took rest today
-      sortedNurses.forEach((nurse) => {
-        if (!nursesAssignedToday.has(nurse.id)) {
-          const state = nurseStates.get(nurse.id)!;
-          state.consecutiveWorkingDays = 0;
-          state.consecutiveLateEnds = 0;
-        }
-      });
+      // End-of-Day Lifecycle: nothing to reset — consecutive-day/late-duty streaks are
+      // derived on demand from the calendar lookback helpers (F-23).
     }
 
     if (onProgress) {

@@ -41,6 +41,7 @@ export const ALL_COLLECTIONS: CollectionName[] = [
   'userAccess',
   'availabilityRequests',
   'systemMetadata',
+  'workingHoursPeriods',
 ];
 
 export class JsonFileRepository implements IRepository {

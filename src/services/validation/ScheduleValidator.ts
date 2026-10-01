@@ -30,7 +30,7 @@ import {
 } from '../../types';
 import { formatDate } from '../../utils/dateUtils';
 import { isExclusiveNurseClinic } from '../engine/nurseClinicUtils';
-import { calculateWorkingHoursForDateRange } from '../periods/workingHoursPeriodService';
+import { calculateWorkingHoursForDateRange, getInclusiveDays } from '../periods/workingHoursPeriodService';
 import { calculateDutyDurationHours } from '../reports/hoursAccounting';
 import { resolveRule } from '../engine/SchedulingEngine';
 
@@ -124,6 +124,18 @@ export class ScheduleValidator {
       const isPlusOneHard = (plusOneRule?.severity || 'HARD') === 'HARD';
       const plusOneSeverity: FindingSeverity = isPlusOneHard ? 'ERROR' : 'WARN';
 
+      // F-10: the operating window is the span of the day's actual sessions —
+      // mirrors the generation engine so the validator doesn't demand (or excuse)
+      // coverage for hours when the clinic is closed.
+      const dayOpStart =
+        daySessions.length > 0
+          ? daySessions.reduce((min, s) => (s.startTime < min ? s.startTime : min), daySessions[0].startTime)
+          : '';
+      const dayOpEnd =
+        daySessions.length > 0
+          ? daySessions.reduce((max, s) => (s.endTime > max ? s.endTime : max), daySessions[0].endTime)
+          : '';
+
       // Hourly coverage tracking from 08:00 to 22:00
       for (let hour = 8; hour <= 21; hour++) {
         const hourStr = `${String(hour).padStart(2, '0')}:00`;
@@ -139,8 +151,9 @@ export class ScheduleValidator {
           return duty.startTime < nextHourStr && duty.endTime > hourStr;
         }).length;
 
-        // If clinic is operating (either active doctors, or within 09:00-21:00 on days with sessions)
-        const isClinicOperating = activeDocs > 0 || (hour >= 9 && hour <= 20 && daySessions.length > 0);
+        // If clinic is operating (active doctors, or within the day's actual session span — F-10)
+        const isClinicOperating =
+          activeDocs > 0 || (daySessions.length > 0 && hourStr < dayOpEnd && nextHourStr > dayOpStart);
         const requiredNurses = activeDocs + (isClinicOperating ? minAdditional : 0);
         const deficit = Math.max(0, requiredNurses - activeNurses);
 
@@ -443,7 +456,12 @@ export class ScheduleValidator {
           });
         }
 
-        if (asgnsToday.length === 1) {
+        // F-20: run rule accounting whenever the nurse works today (>= 1 assignment).
+        // The old `=== 1` guard silently reset the consecutive-day/late-duty chain and
+        // skipped H3/H6/H8 on duplicate-assignment days — the duplicate itself is
+        // already reported as a DATA_ISSUE above, but it must not mask follow-on
+        // violations. Accounting uses the first assignment of the day.
+        if (asgnsToday.length >= 1) {
           const currentAsgn = asgnsToday[0];
           consecutiveDays++;
           const duty = dutyMap.get(currentAsgn.dutyWindowId);
@@ -451,6 +469,8 @@ export class ScheduleValidator {
           totalHours += duration;
 
           // Rule H6: Capability verification (Blood Collection & IV / PHL)
+          // F-22 (design limitation, intentional): PHL is the only hard-gated
+          // credential — mirrors the generation engine's H6 check. Keep both in sync.
           if (currentAsgn.kind === 'CLINICAL_ROLE') {
             const role = roles.find((r) => r.id === currentAsgn.clinicalRoleId);
             if (role?.acronym === 'PHL' && !nurse.capabilityIds.includes(role.id)) {
@@ -627,7 +647,14 @@ export class ScheduleValidator {
           !(le.endDate < schedule.startDate || le.startDate > schedule.endDate)
       );
       nurseLeave.forEach((le) => {
-        totalHours += le.hoursCredited || 8;
+        // F-8: prorate the entry's total credited hours by the days that actually
+        // fall inside this schedule window (mirrors the generation engine).
+        const leaveDays = Math.max(1, getInclusiveDays(le.startDate, le.endDate));
+        const overlapStart = le.startDate > schedule.startDate ? le.startDate : schedule.startDate;
+        const overlapEnd = le.endDate < schedule.endDate ? le.endDate : schedule.endDate;
+        const overlapDays = Math.max(0, getInclusiveDays(overlapStart, overlapEnd));
+        const totalEntryHours = le.hoursCredited || leaveDays * 8;
+        totalHours += Math.round((totalEntryHours * overlapDays) / leaveDays);
       });
 
       // Resolve authoritative full-time target hours

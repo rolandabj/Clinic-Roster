@@ -9,6 +9,8 @@
 import { IRepository } from '../../../src/services/repository/IRepository';
 import { PreflightReport } from './types';
 import { IsoDateString } from '../../../src/types';
+import { generateDoctorSessionsForDateRange } from '../../../src/services/schedule/doctorScheduleService';
+import { getInclusiveDays } from '../../../src/services/periods/workingHoursPeriodService';
 
 export class GenerationPreflightService {
   public static async evaluate(
@@ -53,9 +55,30 @@ export class GenerationPreflightService {
     }
 
     // Filter relevant records within schedule window
-    const scheduleSessions = allSessions.filter(
+    let scheduleSessions = allSessions.filter(
       (s) => !s.cancelled && s.date >= schedule.startDate && s.date <= schedule.endDate
     );
+
+    // F-9: include active doctors' recurring weekly-pattern sessions that are not yet
+    // materialized as stored records — the engine's own preflight does this, and the
+    // generation pass will face this demand once sessions are populated. Without it,
+    // the server preflight under-reported doctor demand.
+    if (activeDoctors.length > 0 && schedule.startDate && schedule.endDate) {
+      const recurringSessions = generateDoctorSessionsForDateRange(
+        schedule.startDate,
+        schedule.endDate,
+        activeDoctors
+      );
+      const existingKeySet = new Set(
+        scheduleSessions.map((s) => `${s.doctorId}_${s.date}_${s.startTime}`)
+      );
+      const missingRecurring = recurringSessions.filter(
+        (s) => !existingKeySet.has(`${s.doctorId}_${s.date}_${s.startTime}`)
+      );
+      if (missingRecurring.length > 0) {
+        scheduleSessions = [...scheduleSessions, ...missingRecurring];
+      }
+    }
 
     const scheduleLocks = allLocks.filter(
       (l) =>
@@ -81,6 +104,14 @@ export class GenerationPreflightService {
     const phlRole = allRoles.find((r) => r.acronym === 'PHL');
     const phlebotomySlotsCount = totalDays * (phlRole?.defaultDailyQuota || 1);
 
+    // F-9: daily clinical-role demand the engine will actually schedule — ALL non-NC
+    // roles' daily quotas (the engine creates slots per role), not just PHL.
+    const isNcRole = (r: (typeof allRoles)[number]) =>
+      r.id === 'role-nurse-clinic' || r.acronym === 'NC' || r.name.toLowerCase().includes('nurse clinic');
+    const dailyRoleQuota = allRoles
+      .filter((r) => !isNcRole(r))
+      .reduce((sum, r) => sum + (r.defaultDailyQuota || 1), 0);
+
     // Evening doctor sessions
     const eveningSessions = scheduleSessions.filter((s) => s.endTime >= '19:00');
     let eveningCoverageAlert: string | undefined;
@@ -101,7 +132,11 @@ export class GenerationPreflightService {
     let deficitDaysCount = 0;
     const doctorCoverageDemand = datesList.map((date) => {
       const sessionsOnDate = scheduleSessions.filter((s) => s.date === date);
-      const requiredNurses = sessionsOnDate.length;
+      // F-9: the engine fills one nurse per doctor session PLUS the clinical-role
+      // quotas (e.g. phlebotomy) PLUS the dedicated nurse-clinic quota every day —
+      // counting sessions alone understated demand and could report OPTIMAL
+      // readiness for a generation that ends with unmet slots.
+      const requiredNurses = sessionsOnDate.length + dailyRoleQuota + ncQuota;
 
       // Available nurses on this date (not on approved leave and not pinned OFF)
       const nursesOnLeave = new Set(
@@ -162,9 +197,15 @@ export class GenerationPreflightService {
       phlebotomySlotsCount,
       nurseClinicSlotsCount,
       existingLocksCount: scheduleLocks.length,
-      existingLeaveDaysCount: approvedLeaves.length,
+      // F-19: count leave DAYS inside the schedule window, not leave entries — a
+      // single 14-day leave previously reported as 1.
+      existingLeaveDaysCount: approvedLeaves.reduce((acc, le) => {
+        const overlapStart = le.startDate > schedule.startDate ? le.startDate : schedule.startDate;
+        const overlapEnd = le.endDate < schedule.endDate ? le.endDate : schedule.endDate;
+        return acc + Math.max(0, getInclusiveDays(overlapStart, overlapEnd));
+      }, 0),
       estimatedTotalAssignments:
-        scheduleSessions.length + phlebotomySlotsCount + nurseClinicSlotsCount,
+        scheduleSessions.length + totalDays * dailyRoleQuota + nurseClinicSlotsCount,
       eveningCoverageAlert,
       staffingScaleWarning,
       warnings,

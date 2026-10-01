@@ -39,6 +39,9 @@ export async function validateScheduleById(
     locks,
     roles,
     rules,
+    workingHoursPeriods,
+    specialties,
+    doctors,
   ] = await Promise.all([
     repo.list('assignments'),
     repo.list('nurses'),
@@ -49,6 +52,9 @@ export async function validateScheduleById(
     repo.list('locks'),
     repo.list('clinicalRoles'),
     repo.list('rules'),
+    repo.list('workingHoursPeriods'),
+    repo.list('specialties'),
+    repo.list('doctors'),
   ]);
 
   // Filter assignments for this specific schedule
@@ -67,7 +73,8 @@ export async function validateScheduleById(
     (le) => le.startDate <= schedule.endDate && le.endDate >= schedule.startDate
   );
 
-  // Run the comprehensive validation audit
+  // Run the comprehensive validation audit (full relational context for parity
+  // with the client-side validation path — see audit finding F-3)
   const report = ScheduleValidator.validate(
     schedule,
     scheduleAssignments,
@@ -78,7 +85,10 @@ export async function validateScheduleById(
     scheduleLeaves,
     scheduleLocks,
     roles,
-    rules
+    rules,
+    workingHoursPeriods,
+    specialties,
+    doctors
   );
 
   return report;
