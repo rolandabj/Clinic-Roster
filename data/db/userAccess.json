@@ -1,0 +1,13 @@
+[
+  {
+    "id": "usr-access-roland",
+    "email": "rolandabj@gmail.com",
+    "name": "Dr. Roland / Clinical Director",
+    "status": "APPROVED",
+    "appRole": "EDITOR",
+    "isManager": true,
+    "approvedBy": "rolandabj@gmail.com",
+    "approvedAt": "2026-09-30T10:31:42.582Z",
+    "createdAt": "2026-09-30T10:31:42.582Z"
+  }
+]

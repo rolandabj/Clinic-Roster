@@ -1,0 +1,56 @@
+[
+  {
+    "id": "leave-ro",
+    "name": "Request Off",
+    "acronym": "RO",
+    "creditedHours": 0,
+    "countsTowardHoursTarget": false,
+    "color": "#94a3b8",
+    "active": true
+  },
+  {
+    "id": "leave-do",
+    "name": "Day Off",
+    "acronym": "DO",
+    "creditedHours": 0,
+    "countsTowardHoursTarget": false,
+    "color": "#cbd5e1",
+    "active": true
+  },
+  {
+    "id": "leave-bl",
+    "name": "Birthday Leave",
+    "acronym": "BL",
+    "creditedHours": 8,
+    "countsTowardHoursTarget": true,
+    "color": "#f43f5e",
+    "active": true
+  },
+  {
+    "id": "leave-al",
+    "name": "Annual Leave",
+    "acronym": "AL",
+    "creditedHours": 8,
+    "countsTowardHoursTarget": true,
+    "color": "#f59e0b",
+    "active": true
+  },
+  {
+    "id": "leave-ph",
+    "name": "Public Holiday",
+    "acronym": "PH",
+    "creditedHours": 8,
+    "countsTowardHoursTarget": true,
+    "color": "#06b6d4",
+    "active": true
+  },
+  {
+    "id": "leave-sl",
+    "name": "Sick Leave",
+    "acronym": "SL",
+    "creditedHours": 8,
+    "countsTowardHoursTarget": true,
+    "color": "#ec4899",
+    "active": true
+  }
+]

@@ -1,0 +1,20 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isMasterAdmin() {
+      return isAuthenticated() && request.auth.token.email.lower() == 'rolandabj@gmail.com';
+    }
+
+    // Open read and write access for all clinic entities and roster collections
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+

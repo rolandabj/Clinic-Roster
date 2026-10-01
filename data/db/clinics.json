@@ -1,0 +1,22 @@
+[
+  {
+    "id": "clinic-primary",
+    "name": "American Hospital Nad Al Sheba OutPatient clinic",
+    "address": "Nad Al Sheba, Dubai, UAE",
+    "phone": "+971 4 300 0000",
+    "timezone": "Asia/Dubai",
+    "workingDays": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "openTime": "09:00",
+    "closeTime": "21:00",
+    "defaultBlockWeeks": 2,
+    "updatedAt": "2026-09-30T23:18:00.000Z"
+  }
+]

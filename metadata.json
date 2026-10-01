@@ -1,0 +1,6 @@
+{
+  "name": "ClinicRoster",
+  "description": "Outpatient clinic nursing roster and shift scheduling web app with deterministic nurse-to-doctor pairing, leave & locked day enforcement, and Excel-like workbook.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "elog-cf076983",
+    "scheduleId": "direct-dispatch",
+    "versionId": "v1",
+    "kind": "TEST",
+    "recipients": [
+      {
+        "nurseId": "rolandabj@gmail.com",
+        "nurseName": "rolandabj@gmail.com",
+        "email": "rolandabj@gmail.com",
+        "subject": "[Test] Clinic Roster Google Email Dispatch (MOCK)",
+        "bodyPreview": "\n      \n        Clinic Roster Google Email Test\n        This is an automated test verifying that transactional email dispatching is working as expecte",
+        "fullBodyHtml": "\n      <div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px;\">\n        <h2 style=\"color: #0284c7; margin-top: 0;\">Clinic Roster Google Email Test</h2>\n        <p>This is an automated test verifying that transactional email dispatching is working as expected via Google.</p>\n        <div style=\"background: #f8fafc; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 13px; margin: 16px 0;\">\n          <p style=\"margin: 4px 0;\"><strong>Provider:</strong> Google (MOCK)</p>\n          <p style=\"margin: 4px 0;\"><strong>Recipient:</strong> rolandabj@gmail.com</p>\n          <p style=\"margin: 4px 0;\"><strong>Timestamp:</strong> 2026-09-30T13:05:03.778Z</p>\n        </div>\n        <p style=\"color: #64748b; font-size: 12px;\">ClinicRoster Operational Dispatch System</p>\n      </div>\n    ",
+        "status": "MOCK_SENT"
+      }
+    ],
+    "providerMessageId": "mock-c2a2b998",
+    "status": "MOCK_SENT",
+    "sentAt": "2026-09-30T13:05:03.780Z"
+  },
+  {
+    "id": "elog-2a2bb523",
+    "scheduleId": "direct-dispatch",
+    "versionId": "v1",
+    "kind": "TEST",
+    "recipients": [
+      {
+        "nurseId": "rolandabj@gmail.com",
+        "nurseName": "rolandabj@gmail.com",
+        "email": "rolandabj@gmail.com",
+        "subject": "[Test] Clinic Roster Google Email Dispatch (MOCK)",
+        "bodyPreview": "\n      \n        Clinic Roster Google Email Test\n        This is an automated test verifying that transactional email dispatching is working as expecte",
+        "fullBodyHtml": "\n      <div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 8px;\">\n        <h2 style=\"color: #0284c7; margin-top: 0;\">Clinic Roster Google Email Test</h2>\n        <p>This is an automated test verifying that transactional email dispatching is working as expected via Google.</p>\n        <div style=\"background: #f8fafc; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 13px; margin: 16px 0;\">\n          <p style=\"margin: 4px 0;\"><strong>Provider:</strong> Google (MOCK)</p>\n          <p style=\"margin: 4px 0;\"><strong>Recipient:</strong> rolandabj@gmail.com</p>\n          <p style=\"margin: 4px 0;\"><strong>Timestamp:</strong> 2026-09-30T13:07:23.273Z</p>\n        </div>\n        <p style=\"color: #64748b; font-size: 12px;\">ClinicRoster Operational Dispatch System</p>\n      </div>\n    ",
+        "status": "MOCK_SENT"
+      }
+    ],
+    "providerMessageId": "mock-cedf575c",
+    "status": "MOCK_SENT",
+    "sentAt": "2026-09-30T13:07:23.274Z"
+  }
+]

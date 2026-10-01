@@ -1,0 +1,119 @@
+{
+  "entities": {
+    "Clinic": {
+      "title": "Clinic",
+      "description": "Clinic baseline metadata, operating hours, and configurations",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "timezone": { "type": "string" },
+        "defaultBlockWeeks": { "type": "number" },
+        "openTime": { "type": "string" },
+        "closeTime": { "type": "string" },
+        "workingDays": { "type": "array" }
+      },
+      "required": ["id", "name", "timezone"]
+    },
+    "Schedule": {
+      "title": "Schedule",
+      "description": "Roster planning schedule instance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "clinicId": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "blockWeeks": { "type": "number" },
+        "status": { "type": "string" },
+        "publishedVersionId": { "type": "string" }
+      },
+      "required": ["id", "name", "startDate", "endDate"]
+    },
+    "Assignment": {
+      "title": "Assignment",
+      "description": "Individual duty assignment for a nurse on a specific date",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "scheduleId": { "type": "string" },
+        "nurseId": { "type": "string" },
+        "date": { "type": "string" },
+        "dutyWindowId": { "type": "string" },
+        "kind": { "type": "string" },
+        "source": { "type": "string" },
+        "locked": { "type": "boolean" }
+      },
+      "required": ["id", "scheduleId", "nurseId", "date", "dutyWindowId", "kind"]
+    },
+    "Nurse": {
+      "title": "Nurse",
+      "description": "Clinical nursing staff profile and contracts",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "email": { "type": "string" },
+        "seniorityLevelId": { "type": "string" },
+        "fte": { "type": "number" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["id", "name", "code", "seniorityLevelId"]
+    },
+    "Doctor": {
+      "title": "Doctor",
+      "description": "Physician profile with recurring clinic sessions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "specialtyIds": { "type": "array" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["id", "name", "code"]
+    },
+    "SystemMetadata": {
+      "title": "SystemMetadata",
+      "description": "System lifecycle and persistent tombstone record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "status": { "type": "string" },
+        "clearedAt": { "type": "string" },
+        "clearedBy": { "type": "string" },
+        "initializedAt": { "type": "string" },
+        "note": { "type": "string" }
+      },
+      "required": ["id", "status"]
+    }
+  },
+  "firestore": {
+    "/clinics/{clinicId}": {
+      "schema": { "$ref": "Clinic" },
+      "description": "Clinic profile documents"
+    },
+    "/schedules/{scheduleId}": {
+      "schema": { "$ref": "Schedule" },
+      "description": "Roster schedule documents"
+    },
+    "/assignments/{assignmentId}": {
+      "schema": { "$ref": "Assignment" },
+      "description": "Shift duty assignments"
+    },
+    "/nurses/{nurseId}": {
+      "schema": { "$ref": "Nurse" },
+      "description": "Nurses staff records"
+    },
+    "/doctors/{doctorId}": {
+      "schema": { "$ref": "Doctor" },
+      "description": "Physicians roster records"
+    },
+    "/systemMetadata/{id}": {
+      "schema": { "$ref": "SystemMetadata" },
+      "description": "Persistent initialization and tombstone state"
+    }
+  }
+}

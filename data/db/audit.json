@@ -1,0 +1,107 @@
+[
+  {
+    "actor": "Dr. Roland / Clinical Director",
+    "action": "UPDATE",
+    "entity": "ClinicProfile",
+    "entityId": "clinic-primary",
+    "after": {
+      "id": "clinic-primary",
+      "name": "City Health Polyclinic",
+      "address": "Clinical Practice",
+      "phone": "",
+      "timezone": "Asia/Dubai",
+      "workingDays": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "openTime": "09:00",
+      "closeTime": "21:00",
+      "defaultBlockWeeks": 2,
+      "updatedAt": "2026-09-30T12:01:29.762Z"
+    },
+    "note": "Updated clinic profile configuration",
+    "timestamp": "2026-09-30T12:01:29.763Z",
+    "id": "aud-81f9f10e-04eb-46cb-99db-fc269e6684ba"
+  },
+  {
+    "actor": "Dr. Roland / Clinical Director",
+    "action": "UPDATE",
+    "entity": "ClinicProfile",
+    "entityId": "clinic-primary",
+    "after": {
+      "id": "clinic-primary",
+      "name": "American Hospital Nad Al Sheba OutPatient clinic",
+      "address": "Nad Al Sheba, Dubai, UAE",
+      "phone": "+971 4 300 0000",
+      "timezone": "Asia/Dubai",
+      "workingDays": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "openTime": "09:00",
+      "closeTime": "21:00",
+      "defaultBlockWeeks": 2,
+      "updatedAt": "2026-09-30T12:05:34.450Z"
+    },
+    "note": "Updated clinic profile configuration",
+    "timestamp": "2026-09-30T12:05:34.451Z",
+    "id": "aud-50a7ecd6-f4ac-4432-835b-d12eb3423603"
+  },
+  {
+    "actor": "Roland Abou Jaoude",
+    "action": "UPDATE",
+    "entity": "ClinicProfile",
+    "entityId": "clinic-primary",
+    "after": {
+      "id": "clinic-primary",
+      "name": "American Hospital Nad Al Sheba OutPatient clinic",
+      "address": "Nad Al Sheba, Dubai, UAE",
+      "phone": "+971 4 300 0000",
+      "timezone": "Asia/Dubai",
+      "workingDays": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "openTime": "09:00",
+      "closeTime": "21:00",
+      "defaultBlockWeeks": 2,
+      "updatedAt": "2026-09-30T12:07:00.940Z"
+    },
+    "note": "Updated clinic profile configuration",
+    "timestamp": "2026-09-30T12:07:00.942Z",
+    "id": "aud-26da6d2d-105a-4e2b-8b61-0110878fc610"
+  },
+  {
+    "actor": "Administrator",
+    "action": "UPDATE",
+    "entity": "EmailDispatch",
+    "entityId": "mock-c2a2b998",
+    "note": "Google Email (Safe Sandbox): \"[Test] Clinic Roster Google Email Dispatch (MOCK)\" dispatched to 1 recipient(s) with status MOCK_SENT (Sender: rolandabj@gmail.com).",
+    "timestamp": "2026-09-30T13:05:03.780Z",
+    "id": "aud-ce68561c-ed73-4cc4-a8af-2d43822f64c1"
+  },
+  {
+    "actor": "Administrator",
+    "action": "UPDATE",
+    "entity": "EmailDispatch",
+    "entityId": "mock-cedf575c",
+    "note": "Google Email (Safe Sandbox): \"[Test] Clinic Roster Google Email Dispatch (MOCK)\" dispatched to 1 recipient(s) with status MOCK_SENT (Sender: rolandabj@gmail.com).",
+    "timestamp": "2026-09-30T13:07:23.274Z",
+    "id": "aud-ff8d3dc2-4261-4f4e-9a1a-ec26567b264d"
+  }
+]
