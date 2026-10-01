@@ -1,7 +1,7 @@
 # Schedule Creation Engine — Logic Audit Findings
 
 **Repo:** `Clinic-Roster` · **Branch:** `arena/01a0f6af-clinic-roster` · **Audit date:** 2026-10-01
-**Status:** ✅ **AUDIT + REMEDIATION COMPLETE** — all 23 findings closed (22 fixed, 1 documented as intentional)
+**Status:** ✅ **AUDIT + REMEDIATION COMPLETE** — all 24 findings closed (23 fixed, 1 documented as intentional; F-24 user-reported post-audit)
 **Companion document:** `docs/schedule-engine-investigation-plan.md` (the plan this audit executed)
 
 ---
@@ -12,17 +12,17 @@
 
 | Severity | Found | Fixed | Documented (intentional) |
 |---|---:|---:|---:|
-| HIGH     | 5  | 5  | — |
+| HIGH     | 6  | 6  | — |
 | MEDIUM   | 11 | 11 | — |
 | LOW      | 6  | 5  | 1 (F-22) |
 | INFO     | 1  | 1  | — |
-| **Total**| **23** | **22** | **1** |
+| **Total**| **24** | **23** | **1** |
 
 Plus 4 pre-seeded hypotheses **disproven / verified OK** (H3 rest formula, UTC date math,
 validator cancelled-session filter, determinism) — see the end of this document.
 
-Cumulative remediation diff: **9 source files, +378 / −109 lines**, verified by
-**7 differential regression suites** (every one proven to FAIL on the pre-fix code and
+Cumulative remediation diff: **9 source files, +417 / −109 lines**, verified by
+**8 differential regression suites** (every one proven to FAIL on the pre-fix code and
 PASS on the fixed code) and a clean `tsc --noEmit`.
 
 ### Defect table — severity-ranked
@@ -34,6 +34,7 @@ PASS on the fixed code) and a clean `tsc --noEmit`.
 | F-3 | HIGH | Server solver | Server path omitted `workingHoursPeriods` + `doctors` → different rosters than client (+ collection not registered in store/CRUD) | ✅ Fixed | `f3` |
 | F-4 | HIGH | Engine | Inactive nurses receive new duties (incl. via H1 swap and pool) | ✅ Fixed | `f4-f5` |
 | F-5 | HIGH | Engine | H1 senior-fixer and float-pool passes ignore `LockEntry(OFF)` | ✅ Fixed | `f4-f5` |
+| F-24 | HIGH | Engine | Priority-#1 pairings starved by slot processing order — earlier (late-clinic) slots consume the P1 nurse, their doctor falls to the general pool | ✅ Fixed | `f24` |
 | F-6 | MED | Engine | H2 lookback hardcoded to 6 days — configured limits > 6 never enforced | ✅ Fixed | `f6-f7-f13-f14` |
 | F-7 | MED | Engine | Float pool hardcodes its own consecutive-day ceiling (5), ignores the H2 rule | ✅ Fixed | `f6-f7-f13-f14` |
 | F-8 | MED | Engine + Validator | Partial leave overlap credits the FULL leave entry to the window | ✅ Fixed | `f8-f9-f15` |
@@ -68,6 +69,7 @@ Run each with `npx tsx docs/engine-audit/repro/<file>`.
 | `f10-f11-f16-plusone-coverage.test.ts` | F-10, F-11, F-16 | phantom 22:00 extension → none; non-covering priority duty → covering duty; MANUAL rewritten + mutated → untouched |
 | `f8-f9-f15-leave-preflight-persistence.test.ts` | F-8, F-9, F-15 | 0 h schedulable → 8 h; preflight 1 session/0 required → 2/3 + deficit warning; delete-all-first → upsert-first, only stale removed |
 | `f12-f17-f19-f20-f21-remainder.test.ts` | F-12, F-17, F-19, F-20, F-21 | junior on non-overlap late duty → early duty; lock count 2 → 1; 14-day leave = 1 → 10; missing H2 finding → flagged; silent/opaque block errors → clear rejections |
+| `f24-priority-pairing-starvation.test.ts` | F-24 | Dr. Samer staffed by general-pool Cheene while P1 nurse Roland consumed by the earlier 9–9 slot → Roland on Samer, P1 pairings 0 → 1 |
 
 ### Fix ranking (as executed)
 
@@ -166,6 +168,23 @@ The main slot pass correctly skips nurses with a `LockEntry(mode='OFF')` (lines
 *Fix:* add the same `activeLocks … mode === 'OFF'` guard to both passes.
 
 ---
+
+### F-24 (HIGH) — ✅ FIXED (2026-10-01) — Priority-#1 pairings starved by slot processing order (user-reported)
+`src/services/engine/SchedulingEngine.ts` — daily slot loop (4.3)
+
+Reported from production (Mon Oct 19 roster): nurse Cheene (general pool, "P5" badge)
+was paired with Dr. Samer although nurse Roland holds the **Priority #1** preference
+for him. Root cause: day slots are processed in descending `priority` — late-ending
+clinics (`endTime >= '19:00'`) get **130**, which outranks a clinic with a dedicated
+P1 nurse (**125**). The earlier slot could consume the P1 nurse through their rank-2 /
+specialty / general candidacy, so by the time the P1 doctor's own slot was processed,
+its tier-1 cohort was already exhausted and the pairing degraded to the general pool.
+*Fix:* reservation guard — per day, each doctor's pending (not-yet-processed) DOCTOR
+slot count is tracked; every other slot skips any nurse holding a rank-1 preference
+for a doctor that still has pending slots. The nurse is released the moment their P1
+doctor's slot comes up (or for anything after it). Trade-off (intentional): if the P1
+nurse turns out to be hard-blocked for their own doctor that day, an earlier slot may
+have passed over them — the +1/float passes still pick such nurses up afterwards.
 
 ## MEDIUM
 
@@ -478,6 +497,18 @@ decisions use the lookback helpers instead (two sources of truth).
     raised **no** H2 finding; missing `blockIndex` silently ran a full-roster pass and
     missing `blockWeeks` surfaced as `"Invalid time value"`. Post-fix: all six
     assertions clean. All seven suites green, `tsc --noEmit` clean.
+
+- **2026-10-01 — F-24 fixed** (user-reported after the audit closed):
+  - `SchedulingEngine.ts`: added the priority-pairing reservation to the 4.3 slot
+    pass — `pendingDoctorSlotCounts` built per day, decremented as each DOCTOR slot
+    is processed; the per-nurse candidate filter skips anyone who is rank-1 for a
+    doctor with pending slots unless the current slot IS that doctor's.
+  - Regression test: `docs/engine-audit/repro/f24-priority-pairing-starvation.test.ts`
+    (`npx tsx …`), modeled 1:1 on the reported case. Pre-fix: Dr. Samer staffed by
+    **n-cheene** (general pool) while P1 nurse **n-roland** was consumed by the
+    earlier 09:00–21:00 slot via his rank-2 candidacy; `doctorPriority1PairingsCount`
+    = 0. Post-fix: Roland → Samer, Cheene → Ahmad, P1 count = 1, both sessions
+    staffed. All 8 suites green, `tsc --noEmit` clean.
 
 ## Recommended fix order (original plan — fully executed, see "Fix ranking" at top)
 

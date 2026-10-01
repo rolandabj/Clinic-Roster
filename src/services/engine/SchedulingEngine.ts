@@ -911,6 +911,18 @@ export class SchedulingEngine {
       // Sort slots by priority
       daySlots.sort((a, b) => b.priority - a.priority);
 
+      // F-24: Priority-pairing reservation. Slot processing order (late clinics first)
+      // must not let an earlier slot consume a nurse who is some OTHER doctor's
+      // Priority-#1 pick while that doctor still has an unprocessed session slot
+      // today — that starved explicit P1 pairings into general-pool matches.
+      // Track how many DOCTOR slots per doctor are still pending in today's loop.
+      const pendingDoctorSlotCounts = new Map<string, number>();
+      daySlots.forEach((s) => {
+        if (s.kind === 'DOCTOR') {
+          pendingDoctorSlotCounts.set(s.targetId, (pendingDoctorSlotCounts.get(s.targetId) || 0) + 1);
+        }
+      });
+
       // Track nurses assigned on THIS day
       const nursesAssignedToday = new Set<string>();
 
@@ -940,6 +952,11 @@ export class SchedulingEngine {
 
       // 4.3 Slot Assignment Pass
       for (const slot of daySlots) {
+        // F-24: this slot is now being processed — it no longer counts as "pending",
+        // so its own P1 nurses are released for it (and for anything after it).
+        if (slot.kind === 'DOCTOR') {
+          pendingDoctorSlotCounts.set(slot.targetId, Math.max(0, (pendingDoctorSlotCounts.get(slot.targetId) || 0) - 1));
+        }
         const isNurseClinicSlot =
           slot.kind === 'CLINICAL_ROLE' &&
           (slot.targetId === nurseClinicRole.id ||
@@ -1195,6 +1212,28 @@ export class SchedulingEngine {
                   (l) => l.nurseId === nurse.id && l.date === date && l.mode === 'OFF'
                 );
                 if (hasLockOff) continue;
+
+                // F-24: Priority-pairing reservation — unless this slot IS the nurse's
+                // own Priority-#1 doctor, skip them while any doctor they hold a rank-1
+                // preference for still has a pending (unprocessed) session slot today.
+                // Without this, a higher-priority slot earlier in the loop (e.g. a
+                // late-ending clinic) consumed the P1 nurse through their rank-2 /
+                // specialty / general candidacy, and the P1 doctor's own slot fell
+                // through to the general pool.
+                const isP1ForThisSlot =
+                  slot.kind === 'DOCTOR' &&
+                  nurse.preferences?.some(
+                    (p) => p.kind === 'DOCTOR' && p.refId === slot.targetId && p.rank === 1
+                  );
+                if (!isP1ForThisSlot) {
+                  const reservedForPendingP1Doctor = nurse.preferences?.some(
+                    (p) =>
+                      p.kind === 'DOCTOR' &&
+                      p.rank === 1 &&
+                      (pendingDoctorSlotCounts.get(p.refId) || 0) > 0
+                  );
+                  if (reservedForPendingP1Doctor) continue;
+                }
 
                 // HARD CONSTRAINT: Exclusive Nurse Clinic & Clinic Nurse Capability
                 // When a nurse is not assigned as clinic nurse with no doctor and specialty preference
